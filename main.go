@@ -55,8 +55,9 @@ func main() {
 		} else if b, e := io.ReadAll(hf); e == nil {
 			hf.Close()
 			go func(f string, body []byte) {
-				content := parse_hf(body)
-				uchan <- fmt.Sprintf("%s/ %s", f, content)
+				if content, e := parse_head_file(f, body); e == nil {
+					uchan <- content
+				}
 			}(f, b)
 			continue
 		} else {
@@ -84,7 +85,6 @@ func main() {
 	nfchan := make(chan string)
 	go func() {
 		b := make([]byte, 0)
-		var content string
 	outer:
 		for {
 			select {
@@ -102,8 +102,9 @@ func main() {
 				} else if b, e := io.ReadAll(hf); e == nil {
 					hf.Close()
 					go func(f string, body []byte) {
-						content := parse_hf(body)
-						uchan <- fmt.Sprintf("%s/ %s", f, content)
+						if content, e := parse_head_file(f, body); e == nil {
+							uchan <- content
+						}
 					}(f, b)
 					if e := watcher.Add(filepath.Join(f, ".git")); e != nil {
 						fmt.Println(e)
@@ -124,13 +125,9 @@ func main() {
 						panic(e)
 					} else if b, e = io.ReadAll(f); e == nil {
 						f.Close()
-						content = strings.TrimSpace(fmt.Sprintf("%s", b))
-						if strings.HasPrefix(content, "ref: refs/heads/") {
-							content = strings.TrimPrefix(content, "ref: refs/heads/")
-						} else {
-							content = "detached:" + content[0:6]
+						if content, e := parse_head_file(filepath.Dir(filepath.Dir(ev.Name)), b); e == nil {
+							uchan <- content
 						}
-						uchan <- fmt.Sprintf("%s/ %s", filepath.Dir(filepath.Dir(ev.Name)), content)
 					} else {
 						panic(e)
 					}
@@ -217,12 +214,12 @@ func main() {
 	}
 }
 
-func parse_hf(body []byte) (content string) {
-	content = strings.TrimSpace(fmt.Sprintf("%s", body))
+func parse_head_file(filename string, body []byte) (string, error) {
+	content := strings.TrimSpace(fmt.Sprintf("%s", body))
 	if strings.HasPrefix(content, "ref: refs/heads/") {
 		content = strings.TrimPrefix(content, "ref: refs/heads/")
 	} else {
-		content = "detached:" + content[0:6]
+		content = "D:" + content[0:6]
 	}
-	return
+	return fmt.Sprintf("%s/ %s:%s", filename, filepath.Base(filename), content), nil
 }

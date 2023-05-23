@@ -26,7 +26,7 @@
 	       (dolist (x arr)
 		 (message x)
 		 (let ((xspl (split-string x)))
-		   (puthash (car xspl) (concat "git:" (car (cdr xspl))) git_socket_hash_table)
+		   (puthash (car xspl) (car (cdr xspl)) git_socket_hash_table)
 		   )
 		 )
 	       )

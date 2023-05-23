@@ -14,72 +14,107 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-var root_directory = flag.String("rd", "", "directory to find git repositories")
+var root_file = flag.String("f", "", "file of tracked git repositories")
 
 func main() {
 	flag.Parse()
-	if f, e := os.Stat(*root_directory); e != nil || !f.IsDir() {
-		fmt.Fprintf(os.Stderr, "please set -rd flag to a valid directory\n")
-	} else {
-		fmt.Fprintf(os.Stderr, "watching %s", f.Name())
-	}
 
-	sock_addr := filepath.Join(*root_directory, ".socket")
-	if e := os.RemoveAll(sock_addr); e != nil {
-		panic(e)
+	file_list, err := func(root_file string) ([]string, error) {
+		file_list := make([]string, 0)
+		if f, e := os.Open(root_file); e != nil {
+			return nil, fmt.Errorf("please set -f flag to a file with git repositories\n")
+		} else {
+			b := bufio.NewReader(f)
+			for {
+				if line, e := b.ReadSlice('\n'); e != nil && e != io.EOF {
+					return nil, e
+				} else if e == io.EOF {
+					return file_list, nil
+				} else {
+					file_list = append(file_list, filepath.Clean(strings.TrimSpace(fmt.Sprintf("%s", line))))
+					continue
+				}
+			}
+		}
+	}(*root_file)
+	if err != nil {
+		panic(err)
 	}
-	l, e := net.Listen("unix", sock_addr)
-	if e != nil {
-		panic(e)
-	}
-	defer l.Close()
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		e = err
-		return
+		panic(err)
 	}
 
 	uchan := make(chan string)
-	if dirs, e := os.ReadDir(*root_directory); e != nil {
-		panic(e)
-	} else {
-		for _, dir := range dirs {
-			if !dir.IsDir() {
-				continue
-			}
-			git_dir := filepath.Join(*root_directory, dir.Name(), ".git")
-			if _, e := os.Stat(git_dir); e != nil {
-				continue
-			} else if e = watcher.Add(git_dir); e != nil {
-				panic(e)
-			} else {
-				if f, e := os.Open(filepath.Join(git_dir, "HEAD")); e != nil {
-					panic(e)
-				} else if b, e := io.ReadAll(f); e == nil {
-					f.Close()
-					go func() {
-						content := strings.TrimSpace(fmt.Sprintf("%s", b))
-						if strings.HasPrefix(content, "ref: refs/heads/") {
-							content = strings.TrimPrefix(content, "ref: refs/heads/")
-						} else {
-							content = "detached:" + content[0:6]
-						}
-						uchan <- fmt.Sprintf("%s/ %s", filepath.Dir(git_dir), content)
-					}()
-				} else {
-					panic(e)
-				}
-
-			}
+	for k, f := range file_list {
+		if hf, e := os.Open(filepath.Join(f, ".git", "HEAD")); e != nil {
+			fmt.Fprintf(os.Stderr, "BAD: %s\n", f)
+		} else if e := watcher.Add(filepath.Join(f, ".git")); e != nil {
+			fmt.Fprintf(os.Stderr, "BAD: %s\n", f)
+		} else if b, e := io.ReadAll(hf); e == nil {
+			hf.Close()
+			go func(f string, body []byte) {
+				content := parse_hf(body)
+				uchan <- fmt.Sprintf("%s/ %s", f, content)
+			}(f, b)
+			continue
+		} else {
+			panic(e)
+		}
+		if k < len(file_list)-1 {
+			tmp := file_list[k+1:]
+			file_list = file_list[:k]
+			file_list = append(file_list, tmp...)
+		} else {
+			file_list = file_list[:k]
 		}
 	}
 
+	if rf, e := os.OpenFile(*root_file, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644); e == nil {
+		for _, f := range file_list {
+			rf.Write([]byte(f))
+			rf.Write([]byte{'\n'})
+		}
+		rf.Close()
+	} else {
+		panic(e)
+	}
+
+	nfchan := make(chan string)
 	go func() {
 		b := make([]byte, 0)
 		var content string
+	outer:
 		for {
 			select {
+			case f := <-nfchan:
+				f = filepath.Clean(strings.TrimSpace(f))
+				for _, ef := range file_list {
+					if ef == f {
+						continue outer
+					}
+				}
+				file_list = append(file_list, f)
+				if hf, e := os.Open(filepath.Join(f, ".git", "HEAD")); e != nil {
+					fmt.Println(e)
+					hf.Close()
+				} else if b, e := io.ReadAll(hf); e == nil {
+					hf.Close()
+					go func(f string, body []byte) {
+						content := parse_hf(body)
+						uchan <- fmt.Sprintf("%s/ %s", f, content)
+					}(f, b)
+					if e := watcher.Add(filepath.Join(f, ".git")); e != nil {
+						fmt.Println(e)
+						hf.Close()
+					}
+					if rf, e := os.OpenFile(*root_file, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); e == nil {
+						rf.Write([]byte(f))
+						rf.Write([]byte{'\n'})
+						rf.Close()
+					}
+				}
 			case ev, ok := <-watcher.Events:
 				if !ok {
 					panic(ok)
@@ -111,8 +146,11 @@ func main() {
 	wbs := make([]*bufio.Writer, 0)
 	status := make([]string, 0)
 	var mu sync.Mutex
+
+	// msg handler
 	go func() {
 		for msg := range uchan {
+			fmt.Println(msg)
 			bmsg := []byte(msg)
 			mu.Lock()
 			for _, wb := range wbs {
@@ -141,11 +179,32 @@ func main() {
 			mu.Unlock()
 		}
 	}()
+
+	sock_addr := fmt.Sprintf("%s.socket", *root_file)
+	if e := os.RemoveAll(sock_addr); e != nil {
+		panic(e)
+	}
+	l, e := net.Listen("unix", sock_addr)
+	if e != nil {
+		panic(e)
+	}
+	defer l.Close()
+
 	for {
 		if c, e := l.Accept(); e != nil {
 			panic(e)
 		} else {
 			wb := bufio.NewWriter(c)
+			rb := bufio.NewReader(c)
+			go func() {
+				for {
+					if b, e := rb.ReadSlice('\n'); e != nil {
+						panic(e)
+					} else {
+						nfchan <- fmt.Sprintf("%s", b)
+					}
+				}
+			}()
 			mu.Lock()
 			for _, state := range status {
 				wb.Write([]byte(state))
@@ -156,4 +215,14 @@ func main() {
 			mu.Unlock()
 		}
 	}
+}
+
+func parse_hf(body []byte) (content string) {
+	content = strings.TrimSpace(fmt.Sprintf("%s", body))
+	if strings.HasPrefix(content, "ref: refs/heads/") {
+		content = strings.TrimPrefix(content, "ref: refs/heads/")
+	} else {
+		content = "detached:" + content[0:6]
+	}
+	return
 }

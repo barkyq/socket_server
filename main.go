@@ -189,14 +189,15 @@ func main() {
 
 	for {
 		if c, e := l.Accept(); e != nil {
-			panic(e)
+			c.Close()
+			continue
 		} else {
 			wb := bufio.NewWriter(c)
 			rb := bufio.NewReader(c)
 			go func() {
 				for {
 					if b, e := rb.ReadSlice('\n'); e != nil {
-						panic(e)
+						return
 					} else {
 						nfchan <- fmt.Sprintf("%s", b)
 					}

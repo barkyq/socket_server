@@ -222,5 +222,5 @@ func parse_head_file(filename string, body []byte) (string, error) {
 	} else {
 		content = "D:" + content[0:6]
 	}
-	return fmt.Sprintf("%s/ %s:%s", filename, filepath.Base(filename), content), nil
+	return fmt.Sprintf("%s/ %s", filename, content), nil
 }
